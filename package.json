@@ -1,6 +1,6 @@
 {
   "name": "simple-zip-upload",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "一个简单的打包上传工具",
   "main": "dist/index.js",
   "scripts": {
