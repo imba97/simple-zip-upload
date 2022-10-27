@@ -1,6 +1,5 @@
 import _ from 'lodash'
 import fs from 'fs-extra'
-import path from 'path'
 import { zip } from 'zip-a-folder'
 import moment from 'moment'
 import ChatBot from 'dingtalk-robot-sender'
@@ -24,6 +23,9 @@ export default class ZipUpload {
    */
   private _app: string
 
+  /**
+   * 压缩目标文件夹
+   */
   private _zipTargetDir: string
 
   /**
@@ -39,7 +41,7 @@ export default class ZipUpload {
   /**
    * 版本号填充 0 的个数
    */
-  private _fill: number = 3
+  private _fill: number
 
   /**
    * 钉钉连接信息
@@ -52,7 +54,12 @@ export default class ZipUpload {
   /**
    * 钉钉推送消息内容
    */
-  private _cardInfo
+  private _cardInfo: CardInfo
+
+  /**
+   * 今天 moment 对象
+   */
+  private _today = moment()
 
   constructor(options: ZipUploadOptions) {
     this._uploader = new Uploader(options.sftpOptions)
@@ -68,15 +75,30 @@ export default class ZipUpload {
     this._zipFileDir = options.zipFileDir
 
     this._host = /\/$/.test(options.host) ? options.host : `${options.host}/`
-    this._fill = options.fill
+    this._fill = options.fill || 2
+  }
+
+  // Webpack 钩子
+  apply(compiler: any) {
+    // 打包完成后
+    compiler.hooks.done.tapAsync(
+      'ZipUploadPlugin',
+      async (compilation: any, callback: () => any) => {
+        callback()
+        // production 才会触发插件
+        if (compiler.options.mode === 'production') {
+          console.log(`[SimpleZipUpload]: Actived`)
+          await this.start()
+        }
+      }
+    )
   }
 
   async start() {
-    const today = moment()
-
     let fileCount = 1
 
-    const fileNameReg = new RegExp(`^(${this._app})-${today.format('YYYYMMDD')}`)
+    const fileNameReg = new RegExp(`^${this._app}-${this._today.format('YYYYMMDD')}\\d{${this._fill}}\\.zip`)
+    const excludeReg = new RegExp(`${this._today.format('YYYYMMDD')}\\d+\\.zip`)
 
     // 创建目录结构
     if (!fs.existsSync(this._zipFileDir)) {
@@ -87,7 +109,7 @@ export default class ZipUpload {
       _.forEach(files, (file) => {
         if (fileNameReg.test(file)) {
           fileCount++
-        } else {
+        } else if (!excludeReg.test(file)) {
           fs.unlinkSync(`${this._zipFileDir}/${file}`)
         }
       })
@@ -95,8 +117,9 @@ export default class ZipUpload {
 
     // 第几次上传
     const times = _.padStart(`${fileCount}`, this._fill, '0')
+
     // 当前版本 日期 + times
-    const version = `${today.format('YYYYMMDD')}${times}`
+    const version = `${this._today.format('YYYYMMDD')}${times}`
     // 文件名
     const filename = `${this._app}-${version}.zip`
     // 本地 zip 路径
@@ -117,7 +140,7 @@ export default class ZipUpload {
     await this._uploader.connect()
 
     // 清空远程文件夹内容，过滤当天的上传
-    await this._uploader.deleteFiles(this._remoteDir, new RegExp(`${today.format('YYYYMMDD')}\\d+.zip`))
+    await this._uploader.deleteFiles(this._remoteDir, excludeReg)
 
     // 执行上传
     await this._uploader.uploadFile(zipPath, `${this._remoteDir}/${filename}`)
@@ -137,18 +160,17 @@ export default class ZipUpload {
 
     const card: ActionCard = {
       title: '',
-      text: `
-### ${this._cardInfo.title}
+      text: `### ${this._cardInfo.title}
 
 <span style="color: #ccc;">${this._cardInfo.subTitle}</span>
 
 ---
 
-${this._cardInfo.body ? this._cardInfo.body : `\`\`\`
-版本 ${version}
-大小 ${(fileStat.size / 1024 / 1024).toFixed(2)}M
-打包日期 ${today.format('YYYY-MM-DD HH:mm:ss')}
-\`\`\``}
+${this.getBody({
+        version,
+        size: `${(fileStat.size / 1024 / 1024).toFixed(2)}M`,
+        date: this._today.format('YYYY-MM-DD HH:mm:ss')
+      })}
 `,
       hideAvatar: '0',
       btnOrientation: '0',
@@ -162,6 +184,50 @@ ${this._cardInfo.body ? this._cardInfo.body : `\`\`\`
 
     robot.actionCard(card)
   }
+
+  /**
+   * 获取
+   * @param cardBody
+   * @returns 
+   */
+  getBody(cardBody: CardBody) {
+    if (this._cardInfo.body) {
+      if (_.isFunction(this._cardInfo.body)) {
+        return this._cardInfo.body(cardBody)
+      }
+
+      return this._cardInfo.body
+    }
+
+    return `\`\`\`
+版本 ${cardBody.version}
+大小 ${cardBody.size}
+打包日期 ${cardBody.date}
+\`\`\``}
+
+}
+
+type CardBody = {
+  /**
+   * 版本
+   * 
+   * 例：20221027005
+   */
+  version: string
+
+  /**
+   * 压缩包大小
+   * 
+   * 例：1.00M
+   */
+  size: string
+
+  /**
+   * 打包时间
+   * 
+   * 例：2022-10-27 23:57:31
+   */
+  date: string
 }
 
 export type ActionCard = {
@@ -208,34 +274,12 @@ export type ZipUploadOptions = {
   /**
    * 版本号填充 0 的个数
    */
-  fill: number
+  fill?: number
 
   /**
    * 钉钉推送消息内容
    */
-  cardInfo: {
-    /**
-     * 标题
-     */
-    title: string
-
-    /**
-     * 子标题
-     */
-    subTitle: string
-
-    /**
-     * 主体内容
-     * 
-     * @default
-     * ```
-     * 版本 20221027005
-     * 大小 1.00M
-     * 打包日期 2022-10-27 23:57:31
-     * ```
-     */
-    body?: string
-  }
+  cardInfo: CardInfo
 
   /**
    * 钉钉机器人配置
@@ -244,6 +288,30 @@ export type ZipUploadOptions = {
     accessToken: string
     secret: string
   }
+}
+
+export type CardInfo = {
+  /**
+   * 标题
+   */
+  title: string
+
+  /**
+   * 子标题
+   */
+  subTitle: string
+
+  /**
+   * 主体内容
+   * 
+   * @default
+   * ```
+   * 版本 20221027005
+   * 大小 1.00M
+   * 打包日期 2022-10-27 23:57:31
+   * ```
+   */
+  body?: string | ((cardBody: CardBody) => string)
 }
 
 export { }
